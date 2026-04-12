@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Leo RAG — Document Assistant</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+
+<div class="layout">
+
+  <!-- ── Sidebar ─────────────────────────────────────────────────────── -->
+  <aside class="sidebar">
+    <div class="sidebar-header">
+      <div class="logo">
+        <div class="logo-icon">L</div>
+        <span class="logo-text">Leo RAG</span>
+      </div>
+      <button class="btn-new-chat" id="btn-new-chat">
+        <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+          <path d="M12 5v14M5 12h14" stroke-linecap="round"/>
+        </svg>
+        New Chat
+      </button>
+    </div>
+
+    <div class="sessions-list" id="sessions-list"></div>
+
+    <div class="sidebar-footer">
+      <div class="user-info" id="user-info"></div>
+      <div class="sidebar-links">
+        <a href="/admin">Admin</a>
+        <a id="btn-logout" style="cursor:pointer">Sign out</a>
+      </div>
+    </div>
+  </aside>
+
+  <!-- ── Chat area ───────────────────────────────────────────────────── -->
+  <main class="chat-area">
+    <header class="chat-header">
+      <div>
+        <div class="chat-title">Leo Movement Assistant</div>
+        <div class="chat-subtitle">Answers grounded in indexed documents · All claims cited</div>
+      </div>
+    </header>
+
+    <div class="chat-messages" id="chat-messages">
+      <div class="welcome">
+        <div class="welcome-icon">💬</div>
+        <h2>Leo Movement Assistant</h2>
+        <p>Ask any question about the indexed documents. I will answer strictly from the available sources and cite every claim.</p>
+      </div>
+    </div>
+
+    <div class="chat-input-area">
+      <div class="chat-input-row">
+        <textarea
+          id="message-input"
+          placeholder="Ask a question about the documents…"
+          rows="1"
+        ></textarea>
+        <button class="btn-send" id="send-btn" disabled>
+          <svg width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+            <path d="M22 2L11 13M22 2L15 22 11 13 2 9l20-7z" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+        </button>
+      </div>
+      <div class="input-hint">Press Enter to send · Shift+Enter for new line</div>
+    </div>
+  </main>
+
+</div>
+
+<script src="/static/app.js"></script>
+<script>
+  // Enable send button when input has content
+  document.addEventListener("DOMContentLoaded", () => {
+    const input = document.getElementById("message-input");
+    const btn = document.getElementById("send-btn");
+    input.addEventListener("input", () => {
+      btn.disabled = !input.value.trim() || window.state?.isStreaming;
+    });
+  });
+</script>
+
+</body>
+</html>

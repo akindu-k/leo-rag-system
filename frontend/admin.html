@@ -1,0 +1,300 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Leo RAG — Admin</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/static/style.css" />
+  <style>
+    .admin-layout { max-width: 900px; margin: 0 auto; padding: 32px 24px; }
+    .admin-header { display:flex; align-items:center; justify-content:space-between; margin-bottom:32px; }
+    .admin-header h1 { font-size:22px; }
+    .back-link { color:var(--text-muted); font-size:13px; }
+
+    .card { background:var(--bg2); border:1px solid var(--border); border-radius:var(--radius); padding:24px; margin-bottom:24px; }
+    .card h2 { font-size:16px; margin-bottom:16px; }
+
+    /* Upload zone */
+    .upload-zone {
+      border:2px dashed var(--border); border-radius:var(--radius);
+      padding:32px; text-align:center; cursor:pointer; transition:border-color .2s;
+    }
+    .upload-zone:hover, .upload-zone.drag-over { border-color:var(--accent); }
+    .upload-zone input[type=file] { display:none; }
+    .upload-zone .icon { font-size:32px; margin-bottom:8px; }
+    .upload-zone p { color:var(--text-muted); font-size:13px; }
+    .upload-zone strong { color:var(--accent); }
+
+    .upload-meta { margin-top:16px; display:flex; flex-direction:column; gap:10px; }
+    .upload-meta input { max-width:480px; }
+    .btn-upload {
+      padding:10px 24px; border-radius:8px; background:var(--accent); color:#fff;
+      font-weight:600; font-size:14px; transition:background .2s; align-self:flex-start;
+    }
+    .btn-upload:hover { background:var(--accent-hover); }
+    .btn-upload:disabled { opacity:.4; cursor:not-allowed; }
+
+    /* Progress */
+    .progress-bar-wrap { background:var(--bg3); border-radius:4px; height:6px; margin-top:12px; overflow:hidden; }
+    .progress-bar { height:100%; background:var(--accent); transition:width .3s; }
+
+    /* Document table */
+    table { width:100%; border-collapse:collapse; font-size:13px; }
+    th { color:var(--text-muted); font-weight:500; text-align:left; padding:8px 10px; border-bottom:1px solid var(--border); }
+    td { padding:10px 10px; border-bottom:1px solid var(--border); vertical-align:middle; }
+    tr:last-child td { border-bottom:none; }
+    tr:hover td { background:rgba(255,255,255,.02); }
+
+    .badge {
+      display:inline-block; padding:2px 8px; border-radius:4px; font-size:11px; font-weight:600;
+    }
+    .badge-indexed { background:rgba(34,197,94,.15); color:#86efac; }
+    .badge-pending, .badge-processing { background:rgba(245,158,11,.15); color:#fcd34d; }
+    .badge-failed { background:rgba(239,68,68,.15); color:#fca5a5; }
+
+    .btn-delete { color:var(--error); font-size:12px; opacity:.6; }
+    .btn-delete:hover { opacity:1; }
+
+    .empty-state { text-align:center; padding:40px; color:var(--text-muted); font-size:14px; }
+
+    .file-selected { background:var(--bg3); border-radius:8px; padding:12px 14px; margin-top:12px; display:flex; align-items:center; gap:10px; font-size:13px; }
+    .file-icon { font-size:20px; }
+    .file-info { flex:1; }
+    .file-name { font-weight:500; }
+    .file-size { color:var(--text-muted); font-size:12px; }
+  </style>
+</head>
+<body>
+
+<div class="admin-layout">
+
+  <div class="admin-header">
+    <div>
+      <div class="logo" style="margin-bottom:4px">
+        <div class="logo-icon">L</div>
+        <span class="logo-text">Leo RAG</span>
+      </div>
+      <h1>Document Management</h1>
+    </div>
+    <a href="/" class="back-link">← Back to chat</a>
+  </div>
+
+  <!-- Upload card -->
+  <div class="card" id="upload-card">
+    <h2>Upload Document</h2>
+
+    <div class="upload-zone" id="upload-zone">
+      <input type="file" id="file-input" accept=".pdf,.docx,.txt" />
+      <div class="icon">📄</div>
+      <p><strong>Click to browse</strong> or drag &amp; drop</p>
+      <p>Supported: PDF, DOCX, TXT · Max 50 MB</p>
+    </div>
+
+    <div id="file-selected" style="display:none" class="file-selected">
+      <div class="file-icon">📎</div>
+      <div class="file-info">
+        <div class="file-name" id="file-name-display"></div>
+        <div class="file-size" id="file-size-display"></div>
+      </div>
+      <button onclick="clearFile()" style="color:var(--text-muted)">✕</button>
+    </div>
+
+    <div class="upload-meta">
+      <input type="text" id="doc-title" placeholder="Document title (optional)" />
+      <input type="text" id="doc-description" placeholder="Description (optional)" />
+      <button class="btn-upload" id="btn-upload" disabled onclick="uploadDocument()">Upload &amp; Index</button>
+    </div>
+
+    <div id="upload-progress" style="display:none">
+      <div class="progress-bar-wrap"><div class="progress-bar" id="progress-bar" style="width:0%"></div></div>
+      <p id="upload-status" style="font-size:12px;color:var(--text-muted);margin-top:6px;"></p>
+    </div>
+  </div>
+
+  <!-- Documents table -->
+  <div class="card">
+    <h2>Indexed Documents</h2>
+    <div id="docs-container">
+      <div class="empty-state">Loading…</div>
+    </div>
+  </div>
+
+</div>
+
+<script>
+const API = "/api/v1";
+let token = localStorage.getItem("leo_token");
+let selectedFile = null;
+
+/* ── Auth check ─────────────────────────────────────────────────────────────── */
+async function checkAuth() {
+  if (!token) { window.location.href = "/"; return; }
+  const res = await fetch(`${API}/auth/me`, { headers: { Authorization: `Bearer ${token}` } });
+  if (!res.ok) { window.location.href = "/"; return; }
+  return res.json();
+}
+
+/* ── File selection ─────────────────────────────────────────────────────────── */
+const zone = document.getElementById("upload-zone");
+const fileInput = document.getElementById("file-input");
+
+zone.addEventListener("click", () => fileInput.click());
+fileInput.addEventListener("change", () => handleFile(fileInput.files[0]));
+
+zone.addEventListener("dragover", (e) => { e.preventDefault(); zone.classList.add("drag-over"); });
+zone.addEventListener("dragleave", () => zone.classList.remove("drag-over"));
+zone.addEventListener("drop", (e) => {
+  e.preventDefault(); zone.classList.remove("drag-over");
+  handleFile(e.dataTransfer.files[0]);
+});
+
+function handleFile(file) {
+  if (!file) return;
+  const ext = file.name.split(".").pop().toLowerCase();
+  if (!["pdf","docx","txt"].includes(ext)) {
+    showToast("Unsupported file type", "error"); return;
+  }
+  selectedFile = file;
+  document.getElementById("file-selected").style.display = "flex";
+  document.getElementById("file-name-display").textContent = file.name;
+  document.getElementById("file-size-display").textContent = formatSize(file.size);
+  document.getElementById("btn-upload").disabled = false;
+  document.getElementById("doc-title").placeholder = file.name.replace(/\.[^.]+$/, "");
+}
+
+function clearFile() {
+  selectedFile = null;
+  fileInput.value = "";
+  document.getElementById("file-selected").style.display = "none";
+  document.getElementById("btn-upload").disabled = true;
+}
+
+function formatSize(bytes) {
+  if (bytes < 1024) return bytes + " B";
+  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + " KB";
+  return (bytes / (1024 * 1024)).toFixed(1) + " MB";
+}
+
+/* ── Upload ─────────────────────────────────────────────────────────────────── */
+async function uploadDocument() {
+  if (!selectedFile) return;
+
+  const btn = document.getElementById("btn-upload");
+  const progress = document.getElementById("upload-progress");
+  const bar = document.getElementById("progress-bar");
+  const status = document.getElementById("upload-status");
+
+  btn.disabled = true;
+  progress.style.display = "block";
+  status.textContent = "Uploading…";
+  bar.style.width = "20%";
+
+  const form = new FormData();
+  form.append("file", selectedFile);
+  const title = document.getElementById("doc-title").value.trim();
+  const desc = document.getElementById("doc-description").value.trim();
+  if (title) form.append("title", title);
+  if (desc) form.append("description", desc);
+
+  try {
+    bar.style.width = "40%";
+    const res = await fetch(`${API}/documents`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}` },
+      body: form,
+    });
+    bar.style.width = "80%";
+
+    if (!res.ok) {
+      const err = await res.json();
+      throw new Error(err.detail || "Upload failed");
+    }
+
+    const data = await res.json();
+    bar.style.width = "100%";
+    status.textContent = `✓ Uploaded! Ingestion job started (ID: ${data.job.id.slice(0,8)}…)`;
+    status.style.color = "var(--success)";
+
+    clearFile();
+    document.getElementById("doc-title").value = "";
+    document.getElementById("doc-description").value = "";
+    setTimeout(() => { progress.style.display = "none"; bar.style.width = "0%"; status.style.color = ""; }, 4000);
+
+    loadDocuments();
+  } catch (err) {
+    bar.style.width = "100%";
+    bar.style.background = "var(--error)";
+    status.textContent = "✕ " + err.message;
+    status.style.color = "var(--error)";
+    btn.disabled = false;
+  }
+}
+
+/* ── Documents list ─────────────────────────────────────────────────────────── */
+async function loadDocuments() {
+  const container = document.getElementById("docs-container");
+  try {
+    const res = await fetch(`${API}/documents`, { headers: { Authorization: `Bearer ${token}` } });
+    const data = await res.json();
+    const docs = data.items || [];
+
+    if (!docs.length) {
+      container.innerHTML = '<div class="empty-state">No documents uploaded yet.</div>';
+      return;
+    }
+
+    const rows = docs.map(d => `
+      <tr>
+        <td>
+          <div style="font-weight:500">${escHtml(d.title)}</div>
+          <div style="font-size:11px;color:var(--text-muted)">${escHtml(d.file_name)}</div>
+        </td>
+        <td>${d.file_type.toUpperCase()}</td>
+        <td>${formatSize(d.file_size)}</td>
+        <td><span class="badge badge-${d.latest_status || 'pending'}">${d.latest_status || 'pending'}</span></td>
+        <td>${new Date(d.created_at).toLocaleDateString()}</td>
+        <td><button class="btn-delete" onclick="deleteDoc('${d.id}')">Delete</button></td>
+      </tr>`).join("");
+
+    container.innerHTML = `
+      <table>
+        <thead><tr><th>Title</th><th>Type</th><th>Size</th><th>Status</th><th>Uploaded</th><th></th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>`;
+  } catch {
+    container.innerHTML = '<div class="empty-state">Failed to load documents.</div>';
+  }
+}
+
+async function deleteDoc(id) {
+  if (!confirm("Delete this document and all its vectors? This cannot be undone.")) return;
+  const res = await fetch(`${API}/documents/${id}`, {
+    method: "DELETE",
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (res.ok) { showToast("Document deleted"); loadDocuments(); }
+  else showToast("Delete failed — admin access required", "error");
+}
+
+/* ── Utils ─────────────────────────────────────────────────────────────────── */
+function escHtml(s) { return (s || "").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;"); }
+
+function showToast(msg, type = "success") {
+  const el = document.createElement("div");
+  el.className = `toast ${type}`;
+  el.textContent = msg;
+  document.body.appendChild(el);
+  setTimeout(() => el.remove(), 3000);
+}
+
+/* ── Init ─────────────────────────────────────────────────────────────────── */
+checkAuth().then(() => loadDocuments());
+
+// Auto-refresh document status every 10s
+setInterval(loadDocuments, 10000);
+</script>
+
+</body>
+</html>
