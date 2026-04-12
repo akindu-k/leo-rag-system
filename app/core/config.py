@@ -35,10 +35,12 @@ class Settings(BaseSettings):
     OPENAI_API_KEY: str = ""
     EMBEDDING_MODEL: str = "text-embedding-3-small"
 
-    # ── Anthropic ─────────────────────────────────────────────────────────
-    ANTHROPIC_API_KEY: str = ""
-    LLM_MODEL: str = "claude-haiku-4-5-20251001"
+    # ── LLM (OpenAI chat) ─────────────────────────────────────────────────
+    LLM_MODEL: str = "gpt-4o-mini"
     LLM_MAX_TOKENS: int = 2048
+
+    # ── Anthropic (optional, not used by default) ──────────────────────────
+    ANTHROPIC_API_KEY: str = ""
 
     # ── RAG ───────────────────────────────────────────────────────────────
     CHUNK_SIZE: int = 512          # tokens per chunk

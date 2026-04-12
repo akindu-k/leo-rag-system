@@ -1,0 +1,78 @@
+version: "3.9"
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: leo_postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-leo}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB:-leo_rag}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-leo} -d ${POSTGRES_DB:-leo_rag}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    # NOT exposed to host — app talks to it over the internal Docker network
+
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: leo_qdrant
+    volumes:
+      - qdrant_data:/qdrant/storage
+    restart: unless-stopped
+    # NOT exposed to host
+
+  minio:
+    image: minio/minio:latest
+    container_name: leo_minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+    volumes:
+      - minio_data:/data
+    restart: unless-stopped
+    # NOT exposed to host
+
+  app:
+    build: .
+    container_name: leo_app
+    env_file: .env
+    environment:
+      # Override DB URL to use Docker service name
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-leo}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-leo_rag}
+      QDRANT_URL: http://qdrant:6333
+      STORAGE_ENDPOINT: minio:9000
+    depends_on:
+      postgres:
+        condition: service_healthy
+      qdrant:
+        condition: service_started
+      minio:
+        condition: service_started
+    restart: unless-stopped
+    # Only port 8000 exposed to the nginx container, not the host
+
+  nginx:
+    image: nginx:alpine
+    container_name: leo_nginx
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./nginx/certs:/etc/nginx/certs:ro      # mount your SSL certs here
+      - nginx_logs:/var/log/nginx
+    depends_on:
+      - app
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  qdrant_data:
+  minio_data:
+  nginx_logs:
