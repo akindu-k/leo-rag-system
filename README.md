@@ -1,6 +1,6 @@
 # Leo RAG System
 
-A production-grade **Retrieval-Augmented Generation (RAG)** chatbot for the Leo Movement. Answers user queries strictly from uploaded documents with cited sources. Built to connect to a mobile app.
+A production-grade **Retrieval-Augmented Generation (RAG)** chatbot for the Leo Movement. Answers user queries strictly from uploaded documents with cited sources and a grounding audit on every response. Built to connect to a mobile app.
 
 ---
 
@@ -34,12 +34,14 @@ User / Mobile App
   FastAPI App (port 8000)
    ├── Auth (JWT)
    ├── Document Upload API  ──► MinIO (file storage)
-   ├── Ingestion Worker     ──► OpenAI Embeddings ──► Qdrant (vectors)
+   ├── Ingestion Worker     ──► OpenAI Embeddings ──► Qdrant (vectors + text index)
    ├── Chat API (SSE stream)
-   │    ├── OpenAI Embeddings (query)
-   │    ├── Qdrant (vector search)
-   │    ├── Cross-Encoder Reranker
-   │    └── OpenAI GPT (answer generation)
+   │    ├── Query Decomposition   (LLM breaks complex questions into sub-queries)
+   │    ├── HyDE Embedding        (LLM writes hypothetical answer → embed that)
+   │    ├── Hybrid Retrieval      (dense vector + full-text keyword, fused with RRF)
+   │    ├── Cross-Encoder Rerank  (local model scores each candidate)
+   │    ├── OpenAI GPT            (strict document-grounded answer, streamed)
+   │    └── Grounding Validation  (LLM audits answer against source chunks)
    └── Session / Citation API
         │
         ▼
@@ -54,7 +56,7 @@ User / Mobile App
 |---|---|
 | **API framework** | FastAPI (async) |
 | **Database** | PostgreSQL 16 + SQLAlchemy 2.0 async |
-| **Vector store** | Qdrant |
+| **Vector store** | Qdrant (dense vectors + full-text payload index) |
 | **Object storage** | MinIO (S3-compatible) |
 | **Embeddings** | OpenAI `text-embedding-3-small` |
 | **Answer LLM** | OpenAI `gpt-4o-mini` (swappable) |
@@ -103,9 +105,11 @@ leo-rag-system/
 │   │   ├── chunking_service.py    # Structure-first chunking with token limits
 │   │   ├── embedding_service.py   # OpenAI embeddings, batched
 │   │   ├── ingestion_service.py   # Orchestrates the full ingestion pipeline
-│   │   ├── retrieval_service.py   # Qdrant vector search with permission filter
+│   │   ├── query_service.py       # HyDE embedding + query decomposition
+│   │   ├── retrieval_service.py   # Hybrid retrieval (dense + keyword) with RRF
 │   │   ├── reranking_service.py   # Cross-encoder reranking (lazy-loaded)
 │   │   ├── answer_service.py      # OpenAI streaming chat completion
+│   │   ├── validation_service.py  # LLM-as-judge grounding audit
 │   │   ├── citation_service.py    # Build and persist citations
 │   │   └── session_service.py     # Chat session and history management
 │   │
@@ -153,18 +157,22 @@ When a document is uploaded:
    - **Index**: Vectors and full chunk payloads are upserted into **Qdrant**. Chunk metadata is also saved to PostgreSQL.
 4. Job and version status are updated to `indexed`.
 
+On first startup Qdrant also creates a **full-text payload index** on the `content` field — this powers the keyword leg of hybrid retrieval without requiring any re-indexing of existing chunks.
+
 ### Chat / Answer Flow
 
-When a user sends a message:
+When a user sends a message, the pipeline runs in seven stages:
 
-1. **Auth**: JWT validated, session ownership checked.
-2. **Permissions**: Documents accessible to this user are resolved from `document_access_rules`.
-3. **Embed query**: The user's question is embedded with OpenAI.
-4. **Vector search**: Qdrant returns the top-K most similar chunks filtered by accessible document IDs.
-5. **Rerank**: A local cross-encoder scores each (query, chunk) pair and the top-N are kept.
-6. **Generate**: The top-N chunks are injected into the system prompt and OpenAI streams the answer token by token via SSE.
-7. **Persist**: The assistant message and citations are saved to PostgreSQL.
-8. **Stream done**: A final SSE event carries the `message_id` and structured citations back to the client.
+1. **Auth & permissions**: JWT validated, session ownership checked, accessible document IDs resolved.
+2. **Query decomposition**: An LLM call breaks complex multi-part questions into ≤4 focused sub-questions. Simple questions pass through unchanged as a single-element list.
+3. **HyDE embedding** *(parallel)*: For each sub-query the LLM writes a short hypothetical document paragraph, which is then embedded. Embedding a plausible *answer* rather than a question pulls the vector into document space and improves recall.
+4. **Hybrid retrieval with RRF**: For each sub-query, two independent searches run against Qdrant:
+   - **Dense leg** — `query_points` with the HyDE embedding, returning the top candidates by cosine similarity.
+   - **Keyword leg** — `scroll` with a `MatchText` filter on the full-text index, returning chunks that literally contain the query terms.
+   All result lists (dense + keyword, across all sub-queries) are merged and deduplicated with **Reciprocal Rank Fusion** (RRF, k=60). Chunks that rank highly in both legs receive the greatest boost.
+5. **Cross-encoder rerank**: A local `ms-marco-MiniLM-L-6-v2` model scores every (query, chunk) pair and the top-N are kept for the prompt.
+6. **Streaming answer**: Top-N chunks are injected into a strictly grounded system prompt. OpenAI streams the answer token by token via SSE.
+7. **Grounding validation**: After streaming completes, a second LLM call audits whether every factual claim in the answer is directly supported by the source chunks. The verdict (`grounded`, `confidence`, `issues`) is included in the final SSE `done` event.
 
 ### Prompting Policy
 
@@ -249,14 +257,14 @@ All settings are read from `.env` via Pydantic Settings. The app never has hard-
 | `QDRANT_URL` | `http://localhost:6333` | Qdrant base URL |
 | `QDRANT_COLLECTION` | `leo_chunks` | Collection name (auto-created) |
 | `QDRANT_VECTOR_SIZE` | `1536` | Must match embedding model output |
-| `OPENAI_API_KEY` | *(required)* | Used for both embeddings and chat |
+| `OPENAI_API_KEY` | *(required)* | Used for embeddings, chat, HyDE, decomposition, and grounding validation |
 | `EMBEDDING_MODEL` | `text-embedding-3-small` | OpenAI embedding model |
-| `LLM_MODEL` | `gpt-4o-mini` | OpenAI chat model |
-| `LLM_MAX_TOKENS` | `2048` | Max tokens in LLM response |
+| `LLM_MODEL` | `gpt-4o-mini` | OpenAI chat model (used for all LLM calls) |
+| `LLM_MAX_TOKENS` | `2048` | Max tokens in the answer LLM response |
 | `CHUNK_SIZE` | `512` | Max tokens per chunk |
 | `CHUNK_OVERLAP` | `64` | Overlap between consecutive chunks |
-| `RETRIEVAL_TOP_K` | `20` | Candidates fetched from Qdrant |
-| `RERANKER_TOP_N` | `5` | Chunks passed to LLM after reranking |
+| `RETRIEVAL_TOP_K` | `20` | Candidates fetched per search leg before RRF |
+| `RERANKER_TOP_N` | `5` | Chunks passed to the LLM after reranking |
 | `RERANKER_MODEL` | `cross-encoder/ms-marco-MiniLM-L-6-v2` | HuggingFace cross-encoder |
 | `ALLOWED_EXTENSIONS` | `["pdf","docx","txt"]` | Accepted upload file types |
 | `MAX_UPLOAD_SIZE_MB` | `50` | Upload size limit |
@@ -305,9 +313,17 @@ Full interactive docs at `/api/v1/docs` when the server is running.
 ```
 data: {"type": "token", "content": "Hello"}
 data: {"type": "token", "content": " world"}
-data: {"type": "done", "message_id": "uuid", "citations": [...]}
+data: {"type": "done", "message_id": "uuid", "citations": [...], "grounding": {"grounded": true, "confidence": 0.97, "issues": null}}
 data: {"type": "error", "message": "..."}
 ```
+
+The `grounding` field in the `done` event:
+
+| Field | Type | Description |
+|---|---|---|
+| `grounded` | `boolean \| null` | `true` if all claims are supported; `null` if validation itself failed |
+| `confidence` | `float \| null` | Auditor's confidence, 0.0 – 1.0 |
+| `issues` | `string \| null` | Description of any unsupported claims, or `null` if fully grounded |
 
 **Mobile app integration:** Use the same REST + SSE endpoints. Add the JWT token as `Authorization: Bearer <token>` on every request. For SSE, use a Fetch-based stream reader (EventSource doesn't support POST or custom headers).
 
@@ -330,6 +346,8 @@ Upload
         ├── Embed  (OpenAI, batches of 100)
         ├── Index  (Qdrant upsert — vector + full payload)
         └── Save chunk metadata → PostgreSQL
+
+On first startup: Qdrant creates a full-text index on the 'content' payload field
 ```
 
 Each chunk stored in Qdrant carries this payload:
@@ -356,12 +374,20 @@ Each chunk stored in Qdrant carries this payload:
 User question
     │
     ▼
-OpenAI embed query  →  1536-dim vector
+Query Decomposition  (LLM)
+    └── complex question → ["sub-query 1", "sub-query 2", ...]
     │
     ▼
-Qdrant query_points
-    ├── Filter: document_id IN [accessible doc IDs]
-    └── Returns top-K (default 20) by cosine similarity
+HyDE Embedding  (parallel, one LLM call per sub-query)
+    └── LLM writes hypothetical answer → embed that text
+    │
+    ▼
+Hybrid Retrieval  (per sub-query)
+    ├── Dense leg:   Qdrant query_points  (HyDE embedding, cosine similarity)
+    └── Keyword leg: Qdrant scroll        (MatchText on full-text content index)
+    │
+    ▼
+Reciprocal Rank Fusion  (merge + deduplicate all result lists)
     │
     ▼
 Cross-encoder rerank  →  top-N (default 5) chunks
@@ -376,7 +402,12 @@ Build prompt
 OpenAI gpt-4o-mini  →  streamed tokens via SSE
     │
     ▼
+Grounding Validation  (LLM-as-judge, runs after streaming)
+    └── Audits answer against source chunks → {grounded, confidence, issues}
+    │
+    ▼
 Save assistant message + citations → PostgreSQL
+Emit "done" SSE event with citations + grounding verdict
 ```
 
 ---
@@ -393,7 +424,7 @@ Documents have access rules stored in `document_access_rules`:
 
 By default, every uploaded document gets an `all` rule — all logged-in users can query it. Admins can restrict documents to specific users or groups by adding targeted rules.
 
-**Permission filtering happens at the Qdrant query level** — the vector search only scans chunks belonging to documents the current user is allowed to access. It is impossible to leak content from restricted documents through the LLM.
+**Permission filtering happens at the Qdrant query level** — both the dense and keyword search legs filter by accessible document IDs. It is impossible to leak content from restricted documents through the LLM.
 
 ---
 
@@ -489,11 +520,23 @@ The cross-encoder model (~91 MB) is downloaded from HuggingFace on the **first c
 python -c "from sentence_transformers import CrossEncoder; CrossEncoder('cross-encoder/ms-marco-MiniLM-L-6-v2')"
 ```
 
+### OpenAI API usage per query
+
+Each chat message now makes several OpenAI calls:
+
+- 1 call for **query decomposition** (small, ~100 tokens output)
+- N calls for **HyDE embedding** — one per sub-query (small, ~100 tokens output each)
+- 1 call for the **answer** (up to `LLM_MAX_TOKENS`)
+- 1 call for **grounding validation** (small, ~100 tokens output)
+
+For a simple single-part question N=1, giving a total of 4 LLM calls per message. Complex multi-part questions may make up to 7 calls. All embedding calls are batched and cheap (`text-embedding-3-small`).
+
 ### Switching LLM
+
 Change `LLM_MODEL` in `.env`:
+
 - `gpt-4o-mini` — cheap, fast (default)
-- `gpt-4o` — higher quality
-- Restore Anthropic: edit `answer_service.py` to use the `AsyncAnthropic` client and set `ANTHROPIC_API_KEY`
+- `gpt-4o` — higher quality, used by all four LLM call sites simultaneously
 
 ### Database migrations
 The app auto-creates tables on startup (via `Base.metadata.create_all`). For schema changes in production, use Alembic:
