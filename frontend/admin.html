@@ -133,7 +133,9 @@ async function checkAuth() {
   if (!token) { window.location.href = "/"; return; }
   const res = await fetch(`${API}/auth/me`, { headers: { Authorization: `Bearer ${token}` } });
   if (!res.ok) { window.location.href = "/"; return; }
-  return res.json();
+  const user = await res.json();
+  if (user.role !== "admin") { window.location.href = "/"; return; }
+  return user;
 }
 
 /* ── File selection ─────────────────────────────────────────────────────────── */

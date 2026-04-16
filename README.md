@@ -1,71 +1,83 @@
 # Leo RAG System
 
-A production-grade **Retrieval-Augmented Generation (RAG)** chatbot for the Leo Movement. Answers user queries strictly from uploaded documents with cited sources and a grounding audit on every response. Built to connect to a mobile app.
+A production-grade **Retrieval-Augmented Generation (RAG) chatbot** for the Leo Movement. Users ask questions in natural language and receive answers sourced strictly from uploaded documents — fully cited, grounding-audited, and streamed in real time.
+
+Designed to run as a hosted web app and connect to a mobile app via the same REST + SSE API.
 
 ---
 
 ## Table of Contents
 
+- [What It Does](#what-it-does)
 - [Architecture Overview](#architecture-overview)
 - [Tech Stack](#tech-stack)
 - [Project Structure](#project-structure)
 - [How It Works](#how-it-works)
-- [Quick Start (Local)](#quick-start-local)
-- [Configuration Reference](#configuration-reference)
+- [Running Locally](#running-locally)
+- [Deploying to Production (Free Stack)](#deploying-to-production-free-stack)
+- [Environment Variable Reference](#environment-variable-reference)
 - [API Reference](#api-reference)
-- [Document Ingestion Pipeline](#document-ingestion-pipeline)
-- [Retrieval & Answer Flow](#retrieval--answer-flow)
 - [Access Control](#access-control)
-- [Frontend](#frontend)
-- [Deployment (Production)](#deployment-production)
+- [Mobile App Integration](#mobile-app-integration)
 - [Development Notes](#development-notes)
+
+---
+
+## What It Does
+
+- **Document ingestion** — admins upload PDF, DOCX, or TXT files. The system parses, chunks, embeds, and indexes them automatically in the background.
+- **Grounded answers** — users ask questions in a chat UI. The system retrieves relevant chunks from the indexed documents and generates an answer using only that content. It will never fabricate or use outside knowledge.
+- **Citations** — every answer includes structured references (document title, page number, section).
+- **Grounding audit** — after each answer is generated, a second LLM call checks whether every claim is supported by the source chunks.
+- **Streaming** — answers are streamed token-by-token so the UI feels responsive.
+- **Permission control** — documents can be restricted to specific users or groups.
 
 ---
 
 ## Architecture Overview
 
 ```
-User / Mobile App
+Browser / Mobile App
         │
         ▼
-   Nginx (TLS)
-        │
-        ▼
-  FastAPI App (port 8000)
-   ├── Auth (JWT)
-   ├── Document Upload API  ──► MinIO (file storage)
-   ├── Ingestion Worker     ──► OpenAI Embeddings ──► Qdrant (vectors + text index)
-   ├── Chat API (SSE stream)
-   │    ├── Query Decomposition   (LLM breaks complex questions into sub-queries)
-   │    ├── HyDE Embedding        (LLM writes hypothetical answer → embed that)
-   │    ├── Hybrid Retrieval      (dense vector + full-text keyword, fused with RRF)
-   │    ├── Cross-Encoder Rerank  (local model scores each candidate)
-   │    ├── OpenAI GPT            (strict document-grounded answer, streamed)
-   │    └── Grounding Validation  (LLM audits answer against source chunks)
-   └── Session / Citation API
-        │
-        ▼
-  PostgreSQL (metadata, sessions, citations)
+   FastAPI App  (Render)
+    │
+    ├── Supabase PostgreSQL   ← user accounts, sessions, citations, document metadata
+    ├── Qdrant Cloud          ← chunk vectors + full-text search index
+    ├── Backblaze B2          ← original uploaded files (S3-compatible)
+    └── OpenAI API            ← embeddings, LLM (decomposition, HyDE, answer, audit)
+```
+
+### Chat pipeline (per message)
+
+```
+User question
+    │
+    ├─ 1. Query Decomposition   LLM splits complex questions into sub-queries
+    ├─ 2. HyDE Embedding        LLM writes a hypothetical answer → embed that
+    ├─ 3. Hybrid Retrieval      Dense vector search + keyword search → RRF merge
+    ├─ 4. Cross-Encoder Rerank  Local model scores each (query, chunk) pair
+    ├─ 5. Answer Generation     GPT streams answer from top-N chunks
+    └─ 6. Grounding Validation  LLM audits every claim against source chunks
 ```
 
 ---
 
 ## Tech Stack
 
-| Layer | Technology |
-|---|---|
-| **API framework** | FastAPI (async) |
-| **Database** | PostgreSQL 16 + SQLAlchemy 2.0 async |
-| **Vector store** | Qdrant (dense vectors + full-text payload index) |
-| **Object storage** | MinIO (S3-compatible) |
-| **Embeddings** | OpenAI `text-embedding-3-small` |
-| **Answer LLM** | OpenAI `gpt-4o-mini` (swappable) |
-| **Reranker** | `cross-encoder/ms-marco-MiniLM-L-6-v2` (local, CPU) |
-| **PDF parsing** | PyMuPDF (fast lane) + Unstructured (fallback) |
-| **Auth** | JWT (python-jose) + bcrypt |
-| **Streaming** | Server-Sent Events (SSE) |
-| **Reverse proxy** | Nginx |
-| **Containerisation** | Docker + Docker Compose |
+| Layer | Technology | Why |
+| --- | --- | --- |
+| API framework | **FastAPI** (async) | Native async, auto-docs, SSE streaming |
+| Database | **PostgreSQL** via Supabase | Relational integrity for users, docs, sessions |
+| Vector store | **Qdrant Cloud** | Dense + full-text index, payload filtering |
+| File storage | **Backblaze B2** | S3-compatible, 10 GB free, no card required |
+| Embeddings | **OpenAI** `text-embedding-3-small` | 1536-dim, strong quality, very low cost |
+| LLM | **OpenAI** `gpt-4o-mini` | Used for all 4 LLM call sites per query |
+| Reranker | `cross-encoder/ms-marco-MiniLM-L-6-v2` | Local CPU model, ~91 MB, high precision |
+| PDF parsing | **PyMuPDF** + **Unstructured** | Fast lane + OCR fallback for scanned PDFs |
+| Auth | **JWT** + **bcrypt** | Stateless, secure, mobile-friendly |
+| Streaming | **Server-Sent Events (SSE)** | Simple, HTTP-native, no WebSocket overhead |
+| Hosting | **Render** | Docker deploy from GitHub, free tier available |
 
 ---
 
@@ -74,70 +86,59 @@ User / Mobile App
 ```
 leo-rag-system/
 │
-├── main.py                        # FastAPI app entry point, lifespan hooks
+├── main.py                        # App entry point, startup hooks
+├── Dockerfile                     # Container image
+├── docker-compose.yml             # Local dev (PostgreSQL, Qdrant, MinIO)
+├── requirements.txt               # Python dependencies
+├── .env                           # Your secrets (never commit this)
+├── .env.example                   # Template for local dev
 │
 ├── app/
 │   ├── api/
 │   │   ├── auth.py                # Register, login, /me, change-password
 │   │   ├── documents.py           # Upload, list, delete documents
 │   │   ├── chat.py                # Streaming chat endpoint (SSE)
-│   │   └── sessions.py            # CRUD for chat sessions
+│   │   └── sessions.py            # Chat session CRUD
 │   │
 │   ├── core/
-│   │   ├── config.py              # All settings via Pydantic / .env
-│   │   ├── database.py            # Async SQLAlchemy engine + session factory
-│   │   └── security.py            # JWT creation/decode, bcrypt, auth dependencies
+│   │   ├── config.py              # All settings loaded from .env
+│   │   ├── database.py            # Async SQLAlchemy engine
+│   │   └── security.py            # JWT, bcrypt, auth dependencies
 │   │
 │   ├── models/                    # SQLAlchemy ORM models
 │   │   ├── user.py                # User, Group, UserGroup
-│   │   ├── document.py            # Document, DocumentVersion, DocumentChunk,
-│   │   │                          #   DocumentAccessRule, IngestionJob
+│   │   ├── document.py            # Document, DocumentVersion, Chunk, AccessRule, Job
 │   │   └── chat.py                # ChatSession, ChatMessage, AnswerCitation
 │   │
-│   ├── schemas/                   # Pydantic request/response shapes
-│   │   ├── auth.py
-│   │   ├── document.py
-│   │   └── chat.py
+│   ├── schemas/                   # Pydantic request/response types
 │   │
 │   ├── services/
-│   │   ├── storage_service.py     # MinIO upload / download / delete
-│   │   ├── parsing_service.py     # PyMuPDF (lane 1) + Unstructured (lane 2)
+│   │   ├── storage_service.py     # Backblaze B2 / S3 upload & download
+│   │   ├── parsing_service.py     # PyMuPDF (fast) + Unstructured (fallback)
 │   │   ├── chunking_service.py    # Structure-first chunking with token limits
 │   │   ├── embedding_service.py   # OpenAI embeddings, batched
-│   │   ├── ingestion_service.py   # Orchestrates the full ingestion pipeline
-│   │   ├── query_service.py       # HyDE embedding + query decomposition
-│   │   ├── retrieval_service.py   # Hybrid retrieval (dense + keyword) with RRF
+│   │   ├── ingestion_service.py   # Full ingestion pipeline orchestrator
+│   │   ├── query_service.py       # HyDE + query decomposition
+│   │   ├── retrieval_service.py   # Hybrid retrieval (dense + keyword) + RRF
 │   │   ├── reranking_service.py   # Cross-encoder reranking (lazy-loaded)
-│   │   ├── answer_service.py      # OpenAI streaming chat completion
+│   │   ├── answer_service.py      # OpenAI streaming answer
 │   │   ├── validation_service.py  # LLM-as-judge grounding audit
-│   │   ├── citation_service.py    # Build and persist citations
-│   │   └── session_service.py     # Chat session and history management
+│   │   ├── citation_service.py    # Build + persist citations
+│   │   └── session_service.py     # Session + message history
 │   │
 │   └── utils/
-│       ├── permissions.py         # Resolve which documents a user can access
-│       └── file_utils.py          # Extension checks, MinIO key builder
-│
-├── migrations/                    # Alembic async migrations
-│   ├── env.py
-│   └── versions/
+│       ├── permissions.py         # Resolve accessible document IDs per user
+│       └── file_utils.py          # Extension + content-type helpers
 │
 ├── frontend/
 │   ├── index.html                 # Chat UI
-│   ├── admin.html                 # Document upload & management UI
+│   ├── admin.html                 # Document management (admin only)
 │   └── static/
-│       ├── app.js                 # Chat logic, SSE streaming, session management
-│       └── style.css              # Dark theme UI
+│       ├── app.js                 # SSE streaming, session management
+│       └── style.css              # Dark theme
 │
-├── nginx/
-│   └── nginx.conf                 # Reverse proxy + SSL + SSE passthrough
-│
-├── docker-compose.yml             # Local development (PostgreSQL, Qdrant, MinIO)
-├── docker-compose.prod.yml        # Production (all services + app + nginx)
-├── Dockerfile                     # App container image
-├── requirements.txt               # Python dependencies
-├── .env.example                   # Local config template
-├── .env.prod.example              # Production config template
-└── alembic.ini                    # Alembic config
+└── nginx/
+    └── nginx.conf                 # Reverse proxy + SSL + SSE passthrough
 ```
 
 ---
@@ -146,160 +147,281 @@ leo-rag-system/
 
 ### Document Ingestion
 
-When a document is uploaded:
+1. Admin uploads a file via `/admin`
+2. File is saved to **Backblaze B2**
+3. Records are created in **PostgreSQL** (`Document`, `DocumentVersion`, `IngestionJob`)
+4. A background task runs:
+   - **Parse** — PyMuPDF for digital PDFs/TXT; Unstructured as fallback for scanned PDFs and DOCX
+   - **Chunk** — split by headings first, then enforce 512-token limit with 64-token overlap
+   - **Embed** — OpenAI `text-embedding-3-small`, batched 100 at a time
+   - **Index** — vectors + full text upserted to Qdrant; chunk metadata saved to PostgreSQL
+5. Status updates to `indexed`
 
-1. File is validated (type + size) and saved to **MinIO**
-2. A `Document`, `DocumentVersion`, and `IngestionJob` record are created in **PostgreSQL**
-3. A **background task** starts the ingestion pipeline:
-   - **Parse**: PyMuPDF extracts text page by page. If output is empty (scanned PDF, complex layout), Unstructured is used as fallback.
-   - **Chunk**: Text is split by headings/structure first, then token-size limits are enforced (default 512 tokens, 64 overlap).
-   - **Embed**: OpenAI `text-embedding-3-small` generates a vector per chunk (batched, 100 at a time).
-   - **Index**: Vectors and full chunk payloads are upserted into **Qdrant**. Chunk metadata is also saved to PostgreSQL.
-4. Job and version status are updated to `indexed`.
+### Chat Answer Flow
 
-On first startup Qdrant also creates a **full-text payload index** on the `content` field — this powers the keyword leg of hybrid retrieval without requiring any re-indexing of existing chunks.
-
-### Chat / Answer Flow
-
-When a user sends a message, the pipeline runs in seven stages:
-
-1. **Auth & permissions**: JWT validated, session ownership checked, accessible document IDs resolved.
-2. **Query decomposition**: An LLM call breaks complex multi-part questions into ≤4 focused sub-questions. Simple questions pass through unchanged as a single-element list.
-3. **HyDE embedding** *(parallel)*: For each sub-query the LLM writes a short hypothetical document paragraph, which is then embedded. Embedding a plausible *answer* rather than a question pulls the vector into document space and improves recall.
-4. **Hybrid retrieval with RRF**: For each sub-query, two independent searches run against Qdrant:
-   - **Dense leg** — `query_points` with the HyDE embedding, returning the top candidates by cosine similarity.
-   - **Keyword leg** — `scroll` with a `MatchText` filter on the full-text index, returning chunks that literally contain the query terms.
-   All result lists (dense + keyword, across all sub-queries) are merged and deduplicated with **Reciprocal Rank Fusion** (RRF, k=60). Chunks that rank highly in both legs receive the greatest boost.
-5. **Cross-encoder rerank**: A local `ms-marco-MiniLM-L-6-v2` model scores every (query, chunk) pair and the top-N are kept for the prompt.
-6. **Streaming answer**: Top-N chunks are injected into a strictly grounded system prompt. OpenAI streams the answer token by token via SSE.
-7. **Grounding validation**: After streaming completes, a second LLM call audits whether every factual claim in the answer is directly supported by the source chunks. The verdict (`grounded`, `confidence`, `issues`) is included in the final SSE `done` event.
-
-### Prompting Policy
-
-The system prompt is strict and non-negotiable:
-
-> Answer **only** from the provided document context. If the answer is not in the documents, say so explicitly. Cite every important claim with `[Document Title, p.PAGE]`.
+1. **Permissions** — resolve which document IDs the user can access
+2. **Decompose** — LLM splits complex questions into ≤4 sub-queries
+3. **HyDE** — LLM writes a hypothetical answer per sub-query; that text is embedded (not the raw question)
+4. **Hybrid retrieval** — per sub-query: dense search (HyDE embedding) + keyword search (MatchText on Qdrant full-text index); all results merged with Reciprocal Rank Fusion
+5. **Rerank** — local cross-encoder scores every (query, chunk) pair; top-5 kept
+6. **Answer** — top-5 chunks injected into a strict system prompt; GPT streams tokens via SSE
+7. **Grounding audit** — second LLM call checks every claim against the source chunks; verdict sent in the `done` SSE event
 
 ---
 
-## Quick Start (Local)
+## Running Locally
 
-### Prerequisites
+### Requirements
+
 - Docker Desktop
-- Python 3.11+ (tested on 3.14)
+- Python 3.11+
 - OpenAI API key
 
-### 1. Clone and configure
+### Steps
 
 ```bash
+# 1. Clone
 git clone <repo-url>
 cd leo-rag-system
+
+# 2. Copy and fill in config
 cp .env.example .env
-```
+# Edit .env — set SECRET_KEY and OPENAI_API_KEY at minimum
 
-Edit `.env` — the only required values are:
-
-```ini
-SECRET_KEY=<run: python -c "import secrets; print(secrets.token_hex(32))">
-OPENAI_API_KEY=sk-...
-LLM_MODEL=gpt-4o-mini
-```
-
-### 2. Start infrastructure services
-
-```bash
+# 3. Start infrastructure (PostgreSQL, Qdrant, MinIO)
 docker-compose up -d
-```
 
-Starts PostgreSQL (5432), Qdrant (6333), and MinIO (9000 / console: 9001).
-
-### 3. Install Python dependencies
-
-```bash
+# 4. Install dependencies
 pip install -r requirements.txt
-```
 
-> First install downloads PyTorch (~115 MB) and the reranker model (~91 MB, on first chat request).
-
-### 4. Run the app
-
-```bash
+# 5. Run
 python main.py
 ```
 
 | URL | Purpose |
-|---|---|
-| http://localhost:8000 | Chat UI |
-| http://localhost:8000/admin | Document upload & management |
-| http://localhost:8000/api/v1/docs | Swagger API docs |
+| --- | --- |
+| `http://localhost:8000` | Chat UI |
+| `http://localhost:8000/admin` | Document management |
+| `http://localhost:8000/api/v1/docs` | Swagger API docs |
 
-### 5. First steps
-
-1. Open the chat UI and **register** — the first account is automatically promoted to **admin**.
-2. Go to **Admin** and upload a PDF, DOCX, or TXT file.
-3. Watch the server logs — ingestion runs in the background and prints progress.
-4. Once status shows `indexed`, ask a question in the chat.
+**First time:** Register an account — the first registered user is automatically made admin. Then go to `/admin` and upload a document.
 
 ---
 
-## Configuration Reference
+## Deploying to Production (Free Stack)
 
-All settings are read from `.env` via Pydantic Settings. The app never has hard-coded secrets.
+This is the recommended zero-cost deployment using fully managed services. You only pay for OpenAI API usage.
 
-| Variable | Default | Description |
-|---|---|---|
-| `SECRET_KEY` | *(required)* | JWT signing secret — generate with `secrets.token_hex(32)` |
-| `DATABASE_URL` | `postgresql+psycopg://leo:leo_password@localhost:5432/leo_rag` | Async PostgreSQL DSN |
-| `STORAGE_ENDPOINT` | `localhost:9000` | MinIO / S3 endpoint |
-| `STORAGE_ACCESS_KEY` | `minioadmin` | MinIO access key |
-| `STORAGE_SECRET_KEY` | `minioadmin123` | MinIO secret key |
-| `STORAGE_BUCKET` | `leo-documents` | Bucket name (auto-created) |
-| `QDRANT_URL` | `http://localhost:6333` | Qdrant base URL |
-| `QDRANT_COLLECTION` | `leo_chunks` | Collection name (auto-created) |
-| `QDRANT_VECTOR_SIZE` | `1536` | Must match embedding model output |
-| `OPENAI_API_KEY` | *(required)* | Used for embeddings, chat, HyDE, decomposition, and grounding validation |
-| `EMBEDDING_MODEL` | `text-embedding-3-small` | OpenAI embedding model |
-| `LLM_MODEL` | `gpt-4o-mini` | OpenAI chat model (used for all LLM calls) |
-| `LLM_MAX_TOKENS` | `2048` | Max tokens in the answer LLM response |
-| `CHUNK_SIZE` | `512` | Max tokens per chunk |
-| `CHUNK_OVERLAP` | `64` | Overlap between consecutive chunks |
-| `RETRIEVAL_TOP_K` | `20` | Candidates fetched per search leg before RRF |
-| `RERANKER_TOP_N` | `5` | Chunks passed to the LLM after reranking |
-| `RERANKER_MODEL` | `cross-encoder/ms-marco-MiniLM-L-6-v2` | HuggingFace cross-encoder |
-| `ALLOWED_EXTENSIONS` | `["pdf","docx","txt"]` | Accepted upload file types |
-| `MAX_UPLOAD_SIZE_MB` | `50` | Upload size limit |
-| `CORS_ORIGINS` | `["http://localhost:8000"]` | Allowed CORS origins (add mobile app origin here) |
+### Services used
+
+| Component | Service | Free limit |
+| --- | --- | --- |
+| App hosting | **Render** | 512 MB RAM (free) or 1 GB RAM ($7/mo) |
+| PostgreSQL | **Supabase** | 500 MB, free forever |
+| Vector store | **Qdrant Cloud** | 1 GB cluster, free forever |
+| File storage | **Backblaze B2** | 10 GB, free, no card required |
+
+> **RAM note:** The reranker model needs ~1 GB RAM. On the free 512 MB Render tier, set `RERANKER_ENABLED=false`. Upgrade to the $7/month Starter plan to enable it.
+
+---
+
+### Step 1 — Push code to GitHub
+
+```bash
+git remote add origin https://github.com/YOUR_USERNAME/leo-rag-system.git
+git push -u origin main
+```
+
+Make sure `.env` is in `.gitignore` — it is by default.
+
+---
+
+### Step 2 — Supabase (PostgreSQL)
+
+1. Sign up at [supabase.com](https://supabase.com) → New project
+2. Go to **Project Settings → Database → Connection pooling**
+3. Copy the **Session mode** connection string (port 5432)
+4. Change the prefix from `postgresql://` to `postgresql+psycopg://`
+
+Your `DATABASE_URL` will look like:
+
+```text
+postgresql+psycopg://postgres.xxxx:YOUR_PASSWORD@aws-1-REGION.pooler.supabase.com:5432/postgres
+```
+
+> **Important:** Use the **Session Pooler** URL (not the direct connection). Render is IPv4-only; the direct Supabase connection is IPv6 on the free tier and will fail to connect.
+
+---
+
+### Step 3 — Qdrant Cloud
+
+1. Sign up at [cloud.qdrant.io](https://cloud.qdrant.io) → Create a **Free cluster**
+2. Copy the **Cluster URL** (e.g. `https://xxxx.eu-west-1-0.aws.cloud.qdrant.io`)
+3. Under **API Keys**, create a key and copy it
+
+---
+
+### Step 4 — Backblaze B2 (file storage)
+
+1. Sign up at [backblaze.com](https://backblaze.com) → B2 Cloud Storage
+2. **Buckets → Create Bucket** — name: `leo-documents`, Private
+3. **App Keys → Add Application Key** — Read & Write access to `leo-documents`
+4. Copy the **keyID** and **applicationKey** (shown only once)
+5. Note the bucket **Endpoint** shown on the bucket page (e.g. `s3.us-east-005.backblazeb2.com`)
+
+---
+
+### Step 5 — Render (app hosting)
+
+1. Sign up at [render.com](https://render.com) → New → Web Service
+2. Connect your GitHub repo
+3. Settings:
+   - **Runtime:** Docker
+   - **Branch:** `main`
+   - **Instance Type:** Free (512 MB) or Starter ($7/mo for reranker)
+4. Add all environment variables (see table below)
+5. Deploy
+
+Once deployed, your app is live at `https://your-app-name.onrender.com`.
+
+---
+
+### Full environment variable list for Render
+
+Copy this, fill in your values, and paste into Render's Environment tab:
+
+```ini
+APP_NAME=Leo RAG System
+DEBUG=false
+API_PREFIX=/api/v1
+
+# Generate: python -c "import secrets; print(secrets.token_hex(32))"
+SECRET_KEY=your_generated_secret_key
+ACCESS_TOKEN_EXPIRE_MINUTES=1440
+
+# Supabase — use Session Pooler URL with postgresql+psycopg:// prefix
+DATABASE_URL=postgresql+psycopg://postgres.xxxx:PASSWORD@aws-1-REGION.pooler.supabase.com:5432/postgres
+
+# Qdrant Cloud
+QDRANT_URL=https://xxxx.eu-west-1-0.aws.cloud.qdrant.io
+QDRANT_API_KEY=your_qdrant_api_key
+QDRANT_COLLECTION=leo_chunks
+QDRANT_VECTOR_SIZE=1536
+
+# Backblaze B2
+STORAGE_ENDPOINT=s3.us-east-005.backblazeb2.com
+STORAGE_ACCESS_KEY=your_backblaze_key_id
+STORAGE_SECRET_KEY=your_backblaze_application_key
+STORAGE_BUCKET=leo-documents
+STORAGE_USE_SSL=true
+
+# OpenAI
+OPENAI_API_KEY=sk-...
+EMBEDDING_MODEL=text-embedding-3-small
+LLM_MODEL=gpt-4o-mini
+LLM_MAX_TOKENS=2048
+
+# RAG settings
+CHUNK_SIZE=512
+CHUNK_OVERLAP=64
+RETRIEVAL_TOP_K=20
+RERANKER_TOP_N=5
+RERANKER_ENABLED=false        # set true only if instance has >= 1 GB RAM
+
+# Upload
+ALLOWED_EXTENSIONS=["pdf","docx","txt"]
+MAX_UPLOAD_SIZE_MB=50
+
+# CORS — set to your Render app URL (and mobile app origin if applicable)
+CORS_ORIGINS=["https://your-app-name.onrender.com"]
+```
+
+---
+
+### After deployment
+
+1. Visit `https://your-app-name.onrender.com`
+2. **Register** — the first account created is automatically admin
+3. Go to `/admin` and upload a document
+4. Wait for status to show `indexed` (check the table — it refreshes every 10 seconds)
+5. Go back to the chat and ask a question
+
+> **Free tier spin-down:** Render's free tier pauses after 15 minutes of inactivity and takes ~30 seconds to wake on the next request. To keep it always-on, use a free uptime monitor like [UptimeRobot](https://uptimerobot.com) to ping your URL every 10 minutes.
+
+---
+
+### Redeploying after a code change
+
+```bash
+git add .
+git commit -m "your message"
+git push
+```
+
+Render automatically redeploys on every push to `main`.
+
+---
+
+## Environment Variable Reference
+
+| Variable | Required | Default | Description |
+| --- | --- | --- | --- |
+| `SECRET_KEY` | Yes | — | JWT signing key — `python -c "import secrets; print(secrets.token_hex(32))"` |
+| `DATABASE_URL` | Yes | — | Full async PostgreSQL DSN |
+| `OPENAI_API_KEY` | Yes | — | Used for embeddings, LLM, HyDE, grounding audit |
+| `QDRANT_URL` | Yes | `http://localhost:6333` | Qdrant base URL |
+| `QDRANT_API_KEY` | Cloud only | `""` | Required for Qdrant Cloud |
+| `QDRANT_COLLECTION` | No | `leo_chunks` | Collection name (auto-created) |
+| `QDRANT_VECTOR_SIZE` | No | `1536` | Must match embedding model |
+| `STORAGE_ENDPOINT` | Yes | `localhost:9000` | B2 / MinIO / S3 endpoint |
+| `STORAGE_ACCESS_KEY` | Yes | — | Storage access key |
+| `STORAGE_SECRET_KEY` | Yes | — | Storage secret key |
+| `STORAGE_BUCKET` | No | `leo-documents` | Bucket name (auto-created) |
+| `STORAGE_USE_SSL` | No | `false` | Set `true` for B2 / S3 |
+| `EMBEDDING_MODEL` | No | `text-embedding-3-small` | OpenAI embedding model |
+| `LLM_MODEL` | No | `gpt-4o-mini` | OpenAI chat model for all LLM calls |
+| `LLM_MAX_TOKENS` | No | `2048` | Max answer length |
+| `CHUNK_SIZE` | No | `512` | Max tokens per chunk |
+| `CHUNK_OVERLAP` | No | `64` | Token overlap between chunks |
+| `RETRIEVAL_TOP_K` | No | `20` | Candidates fetched before reranking |
+| `RERANKER_TOP_N` | No | `5` | Chunks passed to LLM after reranking |
+| `RERANKER_ENABLED` | No | `true` | Set `false` on hosts with < 1 GB RAM |
+| `RERANKER_MODEL` | No | `cross-encoder/ms-marco-MiniLM-L-6-v2` | HuggingFace reranker |
+| `ALLOWED_EXTENSIONS` | No | `["pdf","docx","txt"]` | Accepted file types |
+| `MAX_UPLOAD_SIZE_MB` | No | `50` | Max upload size |
+| `CORS_ORIGINS` | No | `["http://localhost:8000"]` | Allowed origins — add mobile app URL here |
+| `ACCESS_TOKEN_EXPIRE_MINUTES` | No | `1440` | JWT lifetime (default: 24 hours) |
 
 ---
 
 ## API Reference
 
-Full interactive docs at `/api/v1/docs` when the server is running.
+Full interactive docs at `/api/v1/docs`.
 
 ### Auth
 
 | Method | Path | Description |
 |---|---|---|
-| `POST` | `/api/v1/auth/register` | Create account (first account = admin) |
-| `POST` | `/api/v1/auth/login` | Returns JWT access token |
-| `GET` | `/api/v1/auth/me` | Current user info |
+| `POST` | `/api/v1/auth/register` | Create account — first account is auto-promoted to admin |
+| `POST` | `/api/v1/auth/login` | Returns a JWT access token |
+| `GET` | `/api/v1/auth/me` | Returns current user info including role |
 | `POST` | `/api/v1/auth/change-password` | Change password |
 
-### Documents
+### Documents (admin only for upload/delete)
 
 | Method | Path | Description |
 |---|---|---|
 | `POST` | `/api/v1/documents` | Upload a document (multipart/form-data) |
 | `GET` | `/api/v1/documents` | List all documents with ingestion status |
 | `GET` | `/api/v1/documents/{id}/jobs` | Ingestion job history for a document |
-| `DELETE` | `/api/v1/documents/{id}` | Soft-delete + remove Qdrant vectors (admin only) |
+| `DELETE` | `/api/v1/documents/{id}` | Soft-delete + remove vectors (admin only) |
 
 ### Chat Sessions
 
 | Method | Path | Description |
 |---|---|---|
 | `POST` | `/api/v1/sessions` | Create a new chat session |
-| `GET` | `/api/v1/sessions` | List user's sessions |
+| `GET` | `/api/v1/sessions` | List your sessions |
 | `GET` | `/api/v1/sessions/{id}` | Get session with full message + citation history |
 | `DELETE` | `/api/v1/sessions/{id}` | Delete a session |
 
@@ -307,241 +429,94 @@ Full interactive docs at `/api/v1/docs` when the server is running.
 
 | Method | Path | Description |
 |---|---|---|
-| `POST` | `/api/v1/chat/{session_id}/messages` | Send message — returns SSE stream |
+| `POST` | `/api/v1/chat/{session_id}/messages` | Send a message — returns SSE stream |
 
-**SSE event format:**
-```
-data: {"type": "token", "content": "Hello"}
-data: {"type": "token", "content": " world"}
-data: {"type": "done", "message_id": "uuid", "citations": [...], "grounding": {"grounded": true, "confidence": 0.97, "issues": null}}
-data: {"type": "error", "message": "..."}
-```
+**SSE events:**
 
-The `grounding` field in the `done` event:
-
-| Field | Type | Description |
-|---|---|---|
-| `grounded` | `boolean \| null` | `true` if all claims are supported; `null` if validation itself failed |
-| `confidence` | `float \| null` | Auditor's confidence, 0.0 – 1.0 |
-| `issues` | `string \| null` | Description of any unsupported claims, or `null` if fully grounded |
-
-**Mobile app integration:** Use the same REST + SSE endpoints. Add the JWT token as `Authorization: Bearer <token>` on every request. For SSE, use a Fetch-based stream reader (EventSource doesn't support POST or custom headers).
-
----
-
-## Document Ingestion Pipeline
-
-```
-Upload
-  └─► MinIO (original file stored)
-  └─► PostgreSQL (Document + DocumentVersion + IngestionJob records)
-  └─► Background task:
-        ├── Parse
-        │     ├── Lane 1: PyMuPDF (fast, digital PDFs + TXT)
-        │     └── Lane 2: Unstructured (scanned PDFs, DOCX, complex layouts)
-        ├── Chunk
-        │     ├── Split by headings / document structure
-        │     ├── Enforce token-size limit (CHUNK_SIZE)
-        │     └── Add overlap (CHUNK_OVERLAP)
-        ├── Embed  (OpenAI, batches of 100)
-        ├── Index  (Qdrant upsert — vector + full payload)
-        └── Save chunk metadata → PostgreSQL
-
-On first startup: Qdrant creates a full-text index on the 'content' payload field
+```text
+data: {"type": "token",  "content": "The membership fee..."}
+data: {"type": "done",   "message_id": "uuid", "citations": [...], "grounding": {"grounded": true, "confidence": 0.96, "issues": null}}
+data: {"type": "error",  "message": "An internal error occurred."}
 ```
 
-Each chunk stored in Qdrant carries this payload:
-
-```json
-{
-  "document_id": "uuid",
-  "document_version_id": "uuid",
-  "document_title": "...",
-  "file_name": "...",
-  "page_number": 3,
-  "section_title": "Eligibility Criteria",
-  "chunk_index": 12,
-  "content": "Full chunk text...",
-  "language": "en"
-}
-```
-
----
-
-## Retrieval & Answer Flow
-
-```
-User question
-    │
-    ▼
-Query Decomposition  (LLM)
-    └── complex question → ["sub-query 1", "sub-query 2", ...]
-    │
-    ▼
-HyDE Embedding  (parallel, one LLM call per sub-query)
-    └── LLM writes hypothetical answer → embed that text
-    │
-    ▼
-Hybrid Retrieval  (per sub-query)
-    ├── Dense leg:   Qdrant query_points  (HyDE embedding, cosine similarity)
-    └── Keyword leg: Qdrant scroll        (MatchText on full-text content index)
-    │
-    ▼
-Reciprocal Rank Fusion  (merge + deduplicate all result lists)
-    │
-    ▼
-Cross-encoder rerank  →  top-N (default 5) chunks
-    │
-    ▼
-Build prompt
-    ├── System: strict grounding policy
-    ├── Recent chat history (last 6 turns)
-    └── User question + injected document context
-    │
-    ▼
-OpenAI gpt-4o-mini  →  streamed tokens via SSE
-    │
-    ▼
-Grounding Validation  (LLM-as-judge, runs after streaming)
-    └── Audits answer against source chunks → {grounded, confidence, issues}
-    │
-    ▼
-Save assistant message + citations → PostgreSQL
-Emit "done" SSE event with citations + grounding verdict
-```
+**Authentication:** Every request needs `Authorization: Bearer <token>` in the header.
 
 ---
 
 ## Access Control
 
-Documents have access rules stored in `document_access_rules`:
+Every document has access rules in `document_access_rules`:
 
-| `subject_type` | `subject_id` | Meaning |
-|---|---|---|
-| `all` | `NULL` | Every authenticated user can read this document |
-| `user` | `<user_id>` | Only this specific user |
-| `group` | `<group_id>` | All members of this group |
-
-By default, every uploaded document gets an `all` rule — all logged-in users can query it. Admins can restrict documents to specific users or groups by adding targeted rules.
-
-**Permission filtering happens at the Qdrant query level** — both the dense and keyword search legs filter by accessible document IDs. It is impossible to leak content from restricted documents through the LLM.
-
----
-
-## Frontend
-
-Two pages served as static files from FastAPI:
-
-### Chat UI (`/`)
-- Session list sidebar with new chat / delete
-- Streaming answer display (SSE)
-- Collapsible citation cards under each answer (document title, page, excerpt)
-- Auto-titles sessions from the first message
-- Auth modal (register / login) — no separate auth page
-
-### Admin UI (`/admin`)
-- Drag-and-drop document upload with title/description fields
-- Live document table with ingestion status badge (`pending`, `processing`, `indexed`, `failed`)
-- Auto-refreshes status every 10 seconds
-- Delete document (admin only)
-
-**Mobile app:** The frontend is intentionally thin vanilla JS — no framework. The mobile app should integrate directly with the REST + SSE API using its own native UI. Add the mobile app's origin to `CORS_ORIGINS` in `.env`.
-
----
-
-## Deployment (Production)
-
-### Requirements
-- Linux VPS — minimum **2 vCPU / 4 GB RAM** (reranker uses ~1 GB)
-- Domain name pointed at the server
-- Docker installed
-
-### Steps
-
-```bash
-# 1. Get code onto server
-git clone <repo> /opt/leo-rag && cd /opt/leo-rag
-
-# 2. Configure
-cp .env.prod.example .env
-nano .env        # fill in all secrets
-chmod 600 .env
-
-# 3. Get SSL certificate
-apt install certbot
-certbot certonly --standalone -d your-domain.com
-mkdir -p nginx/certs
-cp /etc/letsencrypt/live/your-domain.com/{fullchain,privkey}.pem nginx/certs/
-
-# 4. Update nginx.conf with your domain name
-sed -i 's/your-domain.com/youractualdomain.com/g' nginx/nginx.conf
-
-# 5. Deploy
-docker-compose -f docker-compose.prod.yml up -d --build
-
-# 6. View logs
-docker-compose -f docker-compose.prod.yml logs -f app
-```
-
-### Useful operations
-
-```bash
-# Redeploy after code change
-docker-compose -f docker-compose.prod.yml up -d --build app
-
-# Backup database
-docker exec leo_postgres pg_dump -U leo leo_rag > backup_$(date +%Y%m%d).sql
-
-# SSL auto-renew (add to crontab)
-0 3 * * * certbot renew --quiet && \
-  cp /etc/letsencrypt/live/your-domain.com/*.pem /opt/leo-rag/nginx/certs/ && \
-  docker-compose -f /opt/leo-rag/docker-compose.prod.yml restart nginx
-```
-
-### Managed service alternatives
-
-| Service | Swap with |
+| `subject_type` | Meaning |
 |---|---|
-| Self-hosted PostgreSQL | Supabase / AWS RDS — update `DATABASE_URL` |
-| MinIO | AWS S3 — set `STORAGE_ENDPOINT=s3.amazonaws.com`, `STORAGE_USE_SSL=true` |
-| Self-hosted Qdrant | Qdrant Cloud — update `QDRANT_URL` to their endpoint |
+| `all` | Every logged-in user can query this document |
+| `user` | Only a specific user |
+| `group` | All members of a specific group |
+
+By default, every uploaded document is accessible to all logged-in users (`subject_type = all`). Permission filtering is applied **inside the Qdrant query** — restricted content never reaches the application layer.
+
+Admins bypass all permission filters and can access everything.
+
+---
+
+## Mobile App Integration
+
+The mobile app connects to the same API — no separate backend needed.
+
+1. **Auth:** `POST /api/v1/auth/login` → store the JWT token
+2. **All requests:** add `Authorization: Bearer <token>` header
+3. **Chat:** `POST /api/v1/chat/{session_id}/messages` returns an SSE stream
+   - Use a Fetch-based stream reader, not `EventSource` (EventSource doesn't support POST or custom headers)
+   - Read `data:` lines and parse each as JSON
+4. **CORS:** add your mobile app's origin to `CORS_ORIGINS` in the environment variables
 
 ---
 
 ## Development Notes
 
+### Known issue: psycopg + Supabase connection pooler
+
+Supabase uses PgBouncer as a connection pooler. By default, `psycopg3` uses server-side prepared statements which conflict with PgBouncer. The engine is configured with `prepare_threshold=None` to disable this:
+
+```python
+engine = create_async_engine(
+    settings.DATABASE_URL,
+    connect_args={"prepare_threshold": None},
+)
+```
+
+If you switch to a different PostgreSQL host without a pooler, you can remove this.
+
 ### Windows + Python 3.14
-`psycopg` (async PostgreSQL driver) requires `SelectorEventLoop` on Windows. The app sets this automatically at startup via `WindowsSelectorEventLoopPolicy`. This policy is deprecated in Python 3.14 and will be removed in Python 3.16 — a future fix will use uvicorn's `loop_factory`.
+
+`psycopg` requires `SelectorEventLoop` on Windows. `main.py` sets this automatically via `WindowsSelectorEventLoopPolicy`. This is handled only in local development — Linux (Docker/Render) is unaffected.
 
 ### Reranker model
-The cross-encoder model (~91 MB) is downloaded from HuggingFace on the **first chat request** and cached locally. Subsequent starts load it from cache instantly. To pre-download it:
+
+Downloaded from HuggingFace on first chat request (~91 MB) and cached. Pre-download it with:
 
 ```bash
 python -c "from sentence_transformers import CrossEncoder; CrossEncoder('cross-encoder/ms-marco-MiniLM-L-6-v2')"
 ```
 
-### OpenAI API usage per query
+Set `RERANKER_ENABLED=false` on hosts with less than 1 GB available RAM.
 
-Each chat message now makes several OpenAI calls:
+### OpenAI calls per message
 
-- 1 call for **query decomposition** (small, ~100 tokens output)
-- N calls for **HyDE embedding** — one per sub-query (small, ~100 tokens output each)
-- 1 call for the **answer** (up to `LLM_MAX_TOKENS`)
-- 1 call for **grounding validation** (small, ~100 tokens output)
+Each chat message makes up to 4 LLM calls:
 
-For a simple single-part question N=1, giving a total of 4 LLM calls per message. Complex multi-part questions may make up to 7 calls. All embedding calls are batched and cheap (`text-embedding-3-small`).
+| Call | Purpose | ~Output tokens |
+| --- | --- | --- |
+| Decomposition | Split complex question | 50–150 |
+| HyDE (×N sub-queries) | Write hypothetical answer | 100–200 each |
+| Answer | Grounded streaming answer | Up to `LLM_MAX_TOKENS` |
+| Grounding audit | Validate claims against sources | 50–100 |
+
+For a simple question (N=1 sub-query), that's 4 calls total. `gpt-4o-mini` keeps this affordable.
 
 ### Switching LLM
 
-Change `LLM_MODEL` in `.env`:
+Change `LLM_MODEL` in `.env` — it applies to all four call sites simultaneously:
 
-- `gpt-4o-mini` — cheap, fast (default)
-- `gpt-4o` — higher quality, used by all four LLM call sites simultaneously
-
-### Database migrations
-The app auto-creates tables on startup (via `Base.metadata.create_all`). For schema changes in production, use Alembic:
-
-```bash
-alembic revision --autogenerate -m "description"
-alembic upgrade head
-```
+- `gpt-4o-mini` — fast, cheap (default)
+- `gpt-4o` — higher quality

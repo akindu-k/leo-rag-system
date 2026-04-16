@@ -52,17 +52,21 @@ async def init_qdrant_collection():
     else:
         logger.info(f"Qdrant collection '{settings.QDRANT_COLLECTION}' already exists.")
 
-    # Ensure full-text index exists on the content field (idempotent)
-    try:
-        await client.create_payload_index(
-            collection_name=settings.QDRANT_COLLECTION,
-            field_name="content",
-            field_schema="text",
-        )
-        logger.info("Qdrant full-text index on 'content' ready.")
-    except Exception as exc:
-        # Index may already exist — Qdrant raises an error but that's fine
-        logger.debug("Payload index creation skipped (may already exist): %s", exc)
+    # Ensure payload indexes exist (idempotent — safe to call on existing collection)
+    # Qdrant Cloud requires indexes on any field used in filters
+    for field_name, field_schema in [
+        ("document_id", "keyword"),   # used in permission filters (MatchAny)
+        ("content", "text"),          # used in keyword search (MatchText)
+    ]:
+        try:
+            await client.create_payload_index(
+                collection_name=settings.QDRANT_COLLECTION,
+                field_name=field_name,
+                field_schema=field_schema,
+            )
+            logger.info("Qdrant payload index on '%s' (%s) ready.", field_name, field_schema)
+        except Exception as exc:
+            logger.debug("Index on '%s' skipped (may already exist): %s", field_name, exc)
 
 
 async def upsert_chunks_to_qdrant(points: List[dict]):
