@@ -96,6 +96,9 @@ async def upload_document(
     await db.refresh(version)
     await db.refresh(job)
 
+    # Commit NOW so the background task can find these records in a fresh session
+    await db.commit()
+
     # ── Queue background ingestion ────────────────────────────────────────
     background_tasks.add_task(run_ingestion, job.id)
     logger.info(f"Document '{doc.title}' uploaded. Ingestion job {job.id} queued.")
