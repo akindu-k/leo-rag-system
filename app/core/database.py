@@ -8,8 +8,11 @@ engine = create_async_engine(
     settings.DATABASE_URL,
     echo=settings.DEBUG,
     pool_pre_ping=True,
-    pool_size=10,
-    max_overflow=20,
+    pool_size=5,
+    max_overflow=10,
+    # psycopg3 uses prepared statements by default which breaks
+    # PgBouncer (Supabase connection pooler) — disable them
+    connect_args={"prepare_threshold": None},
 )
 
 AsyncSessionLocal = async_sessionmaker(
