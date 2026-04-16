@@ -28,6 +28,7 @@ class Settings(BaseSettings):
 
     # ── Qdrant ────────────────────────────────────────────────────────────
     QDRANT_URL: str = "http://localhost:6333"
+    QDRANT_API_KEY: str = ""           # required for Qdrant Cloud
     QDRANT_COLLECTION: str = "leo_chunks"
     QDRANT_VECTOR_SIZE: int = 1536  # text-embedding-3-small
 
@@ -53,6 +54,7 @@ class Settings(BaseSettings):
     MAX_UPLOAD_SIZE_MB: int = 50
 
     # ── Reranker ──────────────────────────────────────────────────────────
+    RERANKER_ENABLED: bool = True      # set False on low-memory hosts (< 1 GB RAM)
     RERANKER_MODEL: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"
 
     # ── CORS ──────────────────────────────────────────────────────────────

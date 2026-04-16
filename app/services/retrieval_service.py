@@ -26,7 +26,11 @@ _RRF_K = 60
 def get_qdrant_client() -> AsyncQdrantClient:
     global _qdrant_client
     if _qdrant_client is None:
-        _qdrant_client = AsyncQdrantClient(url=settings.QDRANT_URL, check_compatibility=False)
+        _qdrant_client = AsyncQdrantClient(
+            url=settings.QDRANT_URL,
+            api_key=settings.QDRANT_API_KEY or None,
+            check_compatibility=False,
+        )
     return _qdrant_client
 
 

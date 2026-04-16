@@ -94,8 +94,12 @@ async def chat(
                 accessible_document_ids=accessible_ids,
             )
 
-            # ── 5. Cross-encoder reranking ────────────────────────────────
-            reranked = await reranking_service.rerank(user_message_content, candidates)
+            # ── 5. Cross-encoder reranking (skipped if RERANKER_ENABLED=false) ──
+            from app.core.config import settings as _settings
+            if _settings.RERANKER_ENABLED:
+                reranked = await reranking_service.rerank(user_message_content, candidates)
+            else:
+                reranked = candidates[: _settings.RERANKER_TOP_N]
 
             # ── 6. Load conversation history ──────────────────────────────
             history = await session_service.get_session_history(db, session_id)
