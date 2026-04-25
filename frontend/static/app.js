@@ -2,10 +2,7 @@
 const API = "/api/v1";
 
 const state = {
-  token: localStorage.getItem("leo_token"),
-  user: null,
-  currentSessionId: null,
-  sessions: [],
+  history: [],   // [{role, content}, ...] — maintained client-side
   isStreaming: false,
 };
 
@@ -57,178 +54,7 @@ function renderMarkdown(text) {
   return out.join("");
 }
 
-/* ── Auth API ──────────────────────────────────────────────────────────────── */
-async function apiRequest(method, path, body = null, isForm = false) {
-  const headers = {};
-  if (state.token) headers["Authorization"] = `Bearer ${state.token}`;
-  if (!isForm && body) headers["Content-Type"] = "application/json";
-
-  const res = await fetch(`${API}${path}`, {
-    method,
-    headers,
-    body: body ? (isForm ? body : JSON.stringify(body)) : null,
-  });
-
-  if (res.status === 401) {
-    logout();
-    return null;
-  }
-
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({ detail: "Unknown error" }));
-    let detail = err.detail;
-    // FastAPI 422s return detail as an array of validation error objects
-    if (Array.isArray(detail)) {
-      detail = detail.map((e) => e.msg || JSON.stringify(e)).join(" · ");
-    }
-    throw new Error(detail || "Request failed");
-  }
-
-  if (res.status === 204) return null;
-  return res.json();
-}
-
-/* ── Auth UI ────────────────────────────────────────────────────────────────── */
-function showAuthModal(mode = "login") {
-  const overlay = document.createElement("div");
-  overlay.className = "modal-overlay";
-  overlay.id = "auth-modal";
-
-  const isLogin = mode === "login";
-  overlay.innerHTML = `
-    <div class="modal">
-      <h2>${isLogin ? "Sign in" : "Create account"}</h2>
-      <p>${isLogin ? "Welcome back to Leo RAG" : "Join the Leo RAG system"}</p>
-      <div id="auth-alert" style="display:none" class="alert alert-error"></div>
-      ${!isLogin ? `<div class="field"><label>Full Name</label><input id="auth-name" type="text" placeholder="Your name"></div>` : ""}
-      <div class="field"><label>Email</label><input id="auth-email" type="email" placeholder="you@example.com" autocomplete="email"></div>
-      <div class="field"><label>Password</label><input id="auth-pass" type="password" placeholder="••••••••" autocomplete="${isLogin ? "current-password" : "new-password"}"></div>
-      <button class="btn-primary" id="auth-submit">${isLogin ? "Sign in" : "Create account"}</button>
-      <div class="modal-switch">
-        ${isLogin ? 'No account? <a id="auth-switch">Sign up</a>' : 'Have an account? <a id="auth-switch">Sign in</a>'}
-      </div>
-    </div>
-  `;
-
-  document.body.appendChild(overlay);
-
-  $("#auth-switch", overlay).addEventListener("click", () => {
-    overlay.remove();
-    showAuthModal(isLogin ? "register" : "login");
-  });
-
-  $("#auth-submit", overlay).addEventListener("click", async () => {
-    const email = $("#auth-email", overlay).value.trim();
-    const pass = $("#auth-pass", overlay).value;
-    const alertEl = $("#auth-alert", overlay);
-
-    try {
-      alertEl.style.display = "none";
-      if (isLogin) {
-        const data = await apiRequest("POST", "/auth/login", { email, password: pass });
-        state.token = data.access_token;
-        localStorage.setItem("leo_token", state.token);
-      } else {
-        const name = ($("#auth-name", overlay)?.value || "").trim();
-        await apiRequest("POST", "/auth/register", { email, password: pass, full_name: name || undefined });
-        const data = await apiRequest("POST", "/auth/login", { email, password: pass });
-        state.token = data.access_token;
-        localStorage.setItem("leo_token", state.token);
-      }
-      overlay.remove();
-      await initApp();
-    } catch (err) {
-      alertEl.textContent = err.message;
-      alertEl.style.display = "block";
-    }
-  });
-
-  // Enter key
-  overlay.addEventListener("keydown", (e) => {
-    if (e.key === "Enter") $("#auth-submit", overlay).click();
-  });
-}
-
-function logout() {
-  state.token = null;
-  state.user = null;
-  state.currentSessionId = null;
-  state.sessions = [];
-  localStorage.removeItem("leo_token");
-  renderSidebar();
-  renderMessages([]);
-  showAuthModal("login");
-}
-
-/* ── Sessions ───────────────────────────────────────────────────────────────── */
-async function loadSessions() {
-  try {
-    const data = await apiRequest("GET", "/sessions");
-    state.sessions = data?.items || [];
-  } catch {
-    state.sessions = [];
-  }
-}
-
-async function createSession() {
-  const data = await apiRequest("POST", "/sessions", { title: "New Chat" });
-  state.sessions.unshift(data);
-  state.currentSessionId = data.id;
-  renderSidebar();
-  renderMessages([]);
-}
-
-async function selectSession(id) {
-  state.currentSessionId = id;
-  renderSidebar();
-  try {
-    const data = await apiRequest("GET", `/sessions/${id}`);
-    const messages = data.messages || [];
-    renderMessages(messages);
-  } catch (e) {
-    toast("Failed to load session", "error");
-  }
-}
-
-async function deleteSession(id, e) {
-  e.stopPropagation();
-  await apiRequest("DELETE", `/sessions/${id}`);
-  state.sessions = state.sessions.filter((s) => s.id !== id);
-  if (state.currentSessionId === id) {
-    state.currentSessionId = null;
-    renderMessages([]);
-  }
-  renderSidebar();
-}
-
 /* ── Render ─────────────────────────────────────────────────────────────────── */
-function renderSidebar() {
-  const list = $("#sessions-list");
-  list.innerHTML = "";
-
-  for (const s of state.sessions) {
-    const item = document.createElement("div");
-    item.className = `session-item${s.id === state.currentSessionId ? " active" : ""}`;
-    item.innerHTML = `
-      <span class="session-item-title" title="${escapeHtml(s.title)}">${escapeHtml(s.title)}</span>
-      <button class="session-item-del" data-id="${s.id}" title="Delete">✕</button>
-    `;
-    item.addEventListener("click", () => selectSession(s.id));
-    $(".session-item-del", item).addEventListener("click", (e) => deleteSession(s.id, e));
-    list.appendChild(item);
-  }
-
-  // User info
-  const userEl = $("#user-info");
-  if (state.user && userEl) {
-    const initial = (state.user.full_name || state.user.email)[0].toUpperCase();
-    userEl.innerHTML = `
-      <div class="user-avatar">${initial}</div>
-      <span class="user-email">${escapeHtml(state.user.email)}</span>
-    `;
-  }
-}
-
 function renderMessages(messages) {
   const container = $("#chat-messages");
   container.innerHTML = "";
@@ -254,10 +80,7 @@ function buildMessageEl(msg) {
   const wrapper = document.createElement("div");
   wrapper.className = `message ${msg.role}`;
 
-  const initial = isUser
-    ? (state.user?.full_name || state.user?.email || "U")[0].toUpperCase()
-    : "L";
-
+  const initial = isUser ? "U" : "L";
   const citationsHtml = buildCitationsHtml(msg.citations || []);
 
   wrapper.innerHTML = `
@@ -316,11 +139,6 @@ async function sendMessage() {
   const content = input.value.trim();
   if (!content) return;
 
-  // Ensure we have a session
-  if (!state.currentSessionId) {
-    await createSession();
-  }
-
   input.value = "";
   input.style.height = "auto";
   state.isStreaming = true;
@@ -347,13 +165,10 @@ async function sendMessage() {
   scrollBottom();
 
   try {
-    const res = await fetch(`${API}/chat/${state.currentSessionId}/messages`, {
+    const res = await fetch(`${API}/chat`, {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${state.token}`,
-      },
-      body: JSON.stringify({ content }),
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ content, history: state.history }),
     });
 
     if (!res.ok) {
@@ -377,7 +192,6 @@ async function sendMessage() {
     const bubble = $(`#${bubbleId}`);
     let fullText = "";
     let citations = [];
-    let messageId = null;
 
     const reader = res.body.getReader();
     const decoder = new TextDecoder();
@@ -399,7 +213,6 @@ async function sendMessage() {
             bubble.innerHTML = renderMarkdown(fullText);
             scrollBottom();
           } else if (event.type === "done") {
-            messageId = event.message_id;
             citations = event.citations || [];
           } else if (event.type === "error") {
             throw new Error(event.message);
@@ -420,12 +233,10 @@ async function sendMessage() {
     }
     $(`#${bubbleId}-time`).textContent = formatTime(new Date().toISOString());
 
-    // Update session title in sidebar
-    const sessIdx = state.sessions.findIndex((s) => s.id === state.currentSessionId);
-    if (sessIdx !== -1 && state.sessions[sessIdx].title === "New Chat") {
-      state.sessions[sessIdx].title = content.slice(0, 60);
-      renderSidebar();
-    }
+    // Append to client-side history
+    state.history.push({ role: "user", content });
+    state.history.push({ role: "assistant", content: fullText });
+
   } catch (err) {
     $("#typing-el")?.remove();
     toast(err.message || "Failed to get response", "error");
@@ -451,38 +262,15 @@ function scrollBottom() {
   c.scrollTop = c.scrollHeight;
 }
 
-/* ── Init ────────────────────────────────────────────────────────────────────── */
-async function initApp() {
-  if (!state.token) {
-    showAuthModal("login");
-    return;
-  }
-
-  try {
-    state.user = await apiRequest("GET", "/auth/me");
-  } catch {
-    logout();
-    return;
-  }
-
-  await loadSessions();
-  renderSidebar();
-
-  // Load first session if exists
-  if (state.sessions.length) {
-    await selectSession(state.sessions[0].id);
-  } else {
-    renderMessages([]);
-  }
+function newChat() {
+  state.history = [];
+  renderMessages([]);
 }
 
-/* ── Event Listeners ─────────────────────────────────────────────────────────── */
+/* ── Init ────────────────────────────────────────────────────────────────────── */
 document.addEventListener("DOMContentLoaded", () => {
   // New chat
-  $("#btn-new-chat").addEventListener("click", createSession);
-
-  // Logout
-  $("#btn-logout")?.addEventListener("click", logout);
+  $("#btn-new-chat").addEventListener("click", newChat);
 
   // Send message
   $("#send-btn").addEventListener("click", sendMessage);
@@ -502,5 +290,5 @@ document.addEventListener("DOMContentLoaded", () => {
     }
   });
 
-  initApp();
+  renderMessages([]);
 });
