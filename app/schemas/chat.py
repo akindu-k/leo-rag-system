@@ -50,6 +50,16 @@ class ChatMessageCreate(BaseModel):
     content: str
 
 
+class HistoryMessage(BaseModel):
+    role: str    # "user" or "assistant"
+    content: str
+
+
+class PublicChatRequest(BaseModel):
+    content: str
+    history: List[HistoryMessage] = []
+
+
 class ChatHistoryResponse(BaseModel):
     session: ChatSessionOut
     messages: List[ChatMessageOut]

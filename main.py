@@ -76,7 +76,7 @@ app.add_middleware(
 # ── API routers ───────────────────────────────────────────────────────────────
 from app.api.auth import router as auth_router
 from app.api.documents import router as documents_router
-from app.api.chat import router as chat_router
+from app.api.chat_public import router as chat_router  # stateless, no auth
 from app.api.sessions import router as sessions_router
 
 app.include_router(auth_router, prefix=settings.API_PREFIX)

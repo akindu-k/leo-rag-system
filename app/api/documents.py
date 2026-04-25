@@ -125,7 +125,6 @@ async def list_documents(
     skip: int = 0,
     limit: int = 50,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
 ):
     """List all non-deleted documents with their latest ingestion status."""
     docs_result = await db.execute(
